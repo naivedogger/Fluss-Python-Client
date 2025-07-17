@@ -1,3 +1,4 @@
+use pyo3::prelude::*;
 pub mod error;
 
 pub mod admin;
@@ -6,7 +7,7 @@ pub mod connection;
 pub mod metadata;
 pub mod record;
 mod rpc;
-mod table;
+pub mod table;
 mod util;
 
 pub use self::error::{Error, Result};

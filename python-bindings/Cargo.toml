@@ -1,0 +1,21 @@
+[package]
+name = "fluss-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fluss_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24.0", features = ["extension-module"] }
+tokio = { version = "1.44.2", features = ["full"] }
+anyhow = "1.0.98"
+arrow = "55.1.0"
+fluss_rust = { path = "..", package = "fluss-rust" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+
+[build-dependencies]
+pyo3-build-config = "0.24.0"

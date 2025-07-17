@@ -1,0 +1,42 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fluss-python"
+version = "0.1.0"
+description = "Python bindings for Fluss streaming data platform"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "Fluss Team", email = "dev@fluss.io"},
+]
+keywords = ["fluss", "streaming", "database", "rust", "python"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "arrow>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/fluss-rust"
+Repository = "https://github.com/your-org/fluss-rust"
+Documentation = "https://github.com/your-org/fluss-rust/blob/main/python-bindings/README.md"
+Issues = "https://github.com/your-org/fluss-rust/issues"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
