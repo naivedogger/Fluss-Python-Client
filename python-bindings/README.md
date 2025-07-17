@@ -29,11 +29,11 @@ Fluss runs on all UNIX-like environments (Linux, macOS). Before you start, make 
 
 #### Fluss Setup
 
-Go to the [downloads](https://alibaba.github.io/fluss-docs/downloads/#fluss-060) page and download Fluss-0.6.0. After downloading the latest release, extract it:
+Go to the [downloads](https://alibaba.github.io/fluss-docs/downloads/#fluss-060) page and download Fluss-0.7.0. After downloading the latest release, extract it:
 
 ```shell
-tar -xzf fluss-0.7-SNAPSHOT-bin.tgz
-cd fluss-0.7-SNAPSHOT/
+tar -xzf fluss-0.7-bin.tgz
+cd fluss-0.7/
 ```
 
 Start the Fluss local cluster:
