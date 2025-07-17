@@ -401,25 +401,6 @@ impl PyFlussAdmin {
         Ok(())
     }
     
-    // 异步版本的 create_table（可选）
-    fn create_table_async(&self, table_path: &PyTablePath, descriptor: &PyTableDescriptor, ignore_if_exists: bool) -> PyResult<()> {
-        if let (Some(runtime), Some(admin)) = (&self.runtime, &self.admin) {
-            let table_path_rust = table_path.inner.clone();
-            let descriptor_rust = descriptor.inner.clone();
-            
-            // 使用 spawn 在后台执行，不阻塞当前线程
-            runtime.spawn(async move {
-                match admin.create_table(&table_path_rust, &descriptor_rust, ignore_if_exists).await {
-                    Ok(_) => println!("Table created successfully (async)"),
-                    Err(e) => println!("Failed to create table (async): {}", e),
-                }
-            });
-            
-            println!("Table creation initiated asynchronously");
-        }
-        Ok(())
-    }
-    
     fn drop_table(&self, table_path: &PyTablePath, ignore_if_not_exists: bool) -> PyResult<()> {
         // todo: 目前暂未实现
         if let (Some(runtime), Some(admin)) = (&self.runtime, &self.admin) {
@@ -1239,9 +1220,9 @@ impl PyLogRecord {
                     // Try to parse as different types
                     if let Ok(int_val) = value.parse::<i64>() {
                         Ok(int_val.into_py(py))
-                    } else if let Ok(float_val) = value.extract::<f64>() {
+                    } else if let Ok(float_val) = value.parse::<f64>() {
                         Ok(float_val.into_py(py))
-                    } else if let Ok(bool_val) = value.extract::<bool>() {
+                    } else if let Ok(bool_val) = value.parse::<bool>() {
                         Ok(bool_val.into_py(py))
                     } else {
                         Ok(value.clone().into_py(py))

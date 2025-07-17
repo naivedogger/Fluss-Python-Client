@@ -1,244 +1,183 @@
-# Fluss Python Bindings
+# Fluss Python Client
 
-Python bindings for the Fluss streaming data platform.
+![Experimental](https://img.shields.io/badge/status-experimental-orange)
+
+An unofficial experimental Python client for [Fluss](https://alibaba.github.io/fluss-docs/docs/intro/), a streaming storage built for real-time analytics.
+
+## About Fluss
+
+Fluss is a streaming storage that serves as the real-time data layer for Lakehouse architectures. It enables low-latency, high-throughput data ingestion and processing while seamlessly integrating with popular compute engines.
 
 ## Features
 
-- Connect to Fluss servers
-- Create and manage tables
-- Write and read streaming data
-- Support for various data types (int, string, float, etc.)
-
-## Installation
-
-```bash
-pip install fluss-python
-```
+This Python client provides foundational capabilities for:
+- Table management (create, query schema)
+- Real-time data ingestion (append operations)
+- Log streaming operations (subscribe, scan, poll)
+- Integration with popular Python data tools (PyArrow, Pandas, Polars)
 
 ## Quick Start
 
+### Step 1: Start Fluss Cluster
+
+#### Requirements
+
+Fluss runs on all UNIX-like environments (Linux, macOS). Before you start, make sure you have the following software installed:
+
+- Java 17 or higher (Java 8 and Java 11 are not recommended)
+- JAVA_HOME environment variable set correctly
+
+#### Fluss Setup
+
+Go to the [downloads](https://alibaba.github.io/fluss-docs/downloads/#fluss-060) page and download Fluss-0.6.0. After downloading the latest release, extract it:
+
+```shell
+tar -xzf fluss-0.7-SNAPSHOT-bin.tgz
+cd fluss-0.7-SNAPSHOT/
+```
+
+Start the Fluss local cluster:
+
+```shell
+./bin/local-cluster.sh start
+```
+
+After that, the Fluss local cluster is started and ready to use.
+
+### Step 2: Setup Python Environment
+
+This client supports Linux and macOS. You will need to [install Rust](https://www.rust-lang.org/tools/install) first.
+
+Create and activate a Python virtual environment:
+
+```shell
+python3 -m venv fluss-env
+source fluss-env/bin/activate
+```
+
+Install the required Python dependencies:
+
+```shell
+pip install --upgrade pip
+pip install maturin pyarrow pandas polars
+```
+
+### Step 3: Build and Install the Client
+
+Navigate to the python-bindings directory and build the client:
+
+```shell
+cd python-bindings
+maturin develop --release
+```
+
+This command compiles the Rust code and installs the `fluss_python` module in your Python environment.
+
+### Step 4: Run Your First Example
+
+Now you can run Python scripts that use Fluss:
+
+```shell
+cd ..
+python ./test.py
+```
+
+Here's what the example does:
+
 ```python
-import fluss_python
+import fluss_python as fluss
+import time
 
-# Create connection
-config = fluss_python.PyConnectionConfig("127.0.0.1:9123")
-connection = fluss_python.PyFlussConnection.new(config)
+# 1. Connect to Fluss server
+config = fluss.PyConnectionConfig("127.0.0.1:9123", 30)
+conn = fluss.PyFlussConnection.new(config)
 
-# Create table
-admin = connection.get_admin()
-table_path = fluss_python.PyTablePath("fluss", "test_table")
+# 2. Create a table
+admin = conn.get_admin()
+table_name = f"test_table_{int(time.time())}"
+table_path = fluss.PyTablePath("fluss", table_name)
 
-# Define schema
-schema = fluss_python.PySchema()
+# Define table schema
+schema = fluss.PySchema()
 schema.add_column("id", "int")
 schema.add_column("name", "string")
+schema.add_column("score", "float")
 
-# Create table descriptor and table
-table_desc = fluss_python.PyTableDescriptor(schema)
-admin.create_table(table_path, table_desc, True)
+# Create the table
+descriptor = fluss.PyTableDescriptor(schema)
+admin.create_table(table_path, descriptor, True)
 
-# Get table info
-table_info = admin.get_table(table_path)
-print(f"Table created: {table_info}")
-```
-
-## Supported Data Types
-
-- `int` - 32-bit integer
-- `bigint` - 64-bit integer  
-- `float` - 32-bit floating point
-- `double` - 64-bit floating point
-- `string` - Variable length string
-- `boolean` - Boolean values
-- `bytes` - Binary data
-- `decimal(precision, scale)` - Fixed precision decimal
-- `char(length)` - Fixed length string
-- `binary(length)` - Fixed length binary
-
-## Requirements
-
-- Python 3.7+
-- Fluss server running on accessible network
-
-## Development
-
-This package is built using PyO3 and maturin. To build from source:
-
-```bash
-git clone <repository>
-cd fluss-rust/python-bindings
-maturin develop
-```
-- maturin
-
-### Build and Install
-
-```bash
-cd python-bindings
-
-# Install maturin
-pip install maturin
-
-# Build and install in development mode
-maturin develop
-
-# Or build and install normally
-pip install .
-```
-
-For development:
-```bash
-maturin develop
-```
-
-## Usage
-
-```python
-import asyncio
-from fluss_python import (
-    PyConnectionConfig, 
-    PyFlussConnection, 
-    PyTablePath, 
-    PySchema, 
-    PyTableDescriptor
-)
-
-async def main():
-    # Create connection configuration
-    config = PyConnectionConfig("127.0.0.1:9123", 30)
-    
-    # Create connection
-    conn = await PyFlussConnection.new(config)
-    
-    # Get admin interface
-    admin = conn.get_admin()
-    
-    # Create schema
-    schema = PySchema()
-    schema.add_column("c1", "int")
-    schema.add_column("c2", "string")
-    
-    # Create table descriptor
-    table_descriptor = PyTableDescriptor(schema)
-    
-    # Create table path
-    table_path = PyTablePath("fluss", "python_test")
-    
-    # Create table
-    await admin.create_table(table_path, table_descriptor, True)
-    
-    # Get table info
-    table_info = await admin.get_table(table_path)
-    print(f"Created table: {table_info}")
-    
-    # Get table for operations
-    table = await conn.get_table(table_path)
-    
-    # Create append writer
-    writer = table.new_append()
-    
-    # Create log scanner
-    scanner = table.new_scan()
-    await scanner.subscribe(0, 0)
-    
-    # Poll for records
-    records = await scanner.poll(10)
-    for record in records:
-        print(record)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-## Features
-
-- **Connection Management**: Configure and manage connections to Fluss servers
-- **Table Operations**: Create, query, and manage tables
-- **Data Writing**: Append data to tables
-- **Data Reading**: Scan and poll for records
-- **Schema Management**: Define and work with table schemas
-- **Async Support**: Full async/await support using asyncio
-
-## API Reference
-
-### PyConnectionConfig
-
-Configuration for connecting to a Fluss server.
-
-```python
-config = PyConnectionConfig(bootstrap_server="127.0.0.1:9123", rw_timeout_secs=30)
-```
-
-### PyFlussConnection
-
-Main connection class for interacting with Fluss.
-
-```python
-conn = await PyFlussConnection.new(config)
-admin = conn.get_admin()
-table = await conn.get_table(table_path)
-```
-
-### PyTablePath
-
-Represents a table path (database.table).
-
-```python
-table_path = PyTablePath("database_name", "table_name")
-```
-
-### PySchema
-
-Schema builder for defining table structure.
-
-```python
-schema = PySchema()
-schema.add_column("column_name", "int")  # Supported types: int, string, bigint, float, double, boolean
-```
-
-### PyTableDescriptor
-
-Table descriptor containing schema and other metadata.
-
-```python
-descriptor = PyTableDescriptor(schema)
-```
-
-### PyFlussAdmin
-
-Administrative operations interface.
-
-```python
-admin = conn.get_admin()
-await admin.create_table(table_path, descriptor, ignore_if_exists=True)
-table_info = await admin.get_table(table_path)
-```
-
-### PyTable
-
-Table interface for data operations.
-
-```python
-table = await conn.get_table(table_path)
+# 3. Write data
+table = conn.get_table(table_path)
 writer = table.new_append()
+
+sample_data = [
+    {"id": 1, "name": "Alice", "score": 95.5},
+    {"id": 2, "name": "Bob", "score": 87.2},
+    {"id": 3, "name": "Charlie", "score": 92.1}
+]
+
+writer.append_batch(sample_data)
+writer.flush()
+writer.close()
+
+# 4. Read data
 scanner = table.new_scan()
+scanner.subscribe(0, 0)
+records = scanner.poll(2)
+
+for record in records:
+    print(f"Record: {record.get_all_values()}")
+scanner.close()
 ```
 
-### PyAppendWriter
+### Step 5: Data Conversion Examples
 
-Writer for appending data to tables.
+You can easily convert Fluss records to popular Python data formats:
 
 ```python
-writer = table.new_append()
-# Note: Data format needs to be implemented based on your specific needs
+from fluss_converters import records_to_arrow, records_to_pandas, records_to_polars
+
+# Convert to PyArrow Table
+arrow_table = records_to_arrow(records)
+print(f"Arrow Table: {arrow_table.num_rows} rows, {arrow_table.num_columns} columns")
+
+# Convert to Pandas DataFrame
+pandas_df = records_to_pandas(records)
+print(f"Pandas DataFrame: {pandas_df.shape}")
+
+# Convert to Polars DataFrame
+polars_df = records_to_polars(records)
+print(f"Polars DataFrame: {polars_df.shape}")
 ```
 
-### PyLogScanner
+### Step 6: Clean Up
 
-Scanner for reading log records from tables.
+When you're done, stop the Fluss cluster:
 
-```python
-scanner = table.new_scan()
-await scanner.subscribe(bucket=0, offset=0)
-records = await scanner.poll(timeout_secs=10)
+```shell
+cd fluss-0.7-SNAPSHOT/
+./bin/local-cluster.sh stop
 ```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Connection failed**: Make sure the Fluss server is running on `127.0.0.1:9123`
+2. **Build errors**: Ensure you have Rust installed and updated
+3. **Import errors**: Make sure you're in the correct Python virtual environment
+4. **Java issues**: Verify Java 17+ is installed and JAVA_HOME is set
+
+### Getting Help
+
+If you encounter issues:
+
+1. Check that all prerequisites are installed
+2. Verify the Fluss server is running
+3. Make sure you're using the correct Python virtual environment
+4. Try rebuilding with `maturin develop --release`
+
+## What's Next
+
+This is an experimental client. Feel free to explore the API, contribute improvements, or report issues. The client provides a foundation for building Python applications that interact with Fluss streaming storage.
