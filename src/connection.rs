@@ -382,8 +382,42 @@ async fn __get_response<T: Message + Default>(conn: &mut Connection) -> Result<T
         if resp_type == SUCCESS_RESPONSE {
             Message::decode(&buf[..]).map_err(|e| e.into())
         } else {
-            // current, panic directly, but need to encode it to error code
-            panic!("error in process response")
+            // Handle error response - try to extract error info or return generic error
+            use crate::error::{Error, FlussCode};
+            
+            // Log response details for debugging
+            eprintln!("Error response received: resp_type={}, buf_len={}", resp_type, buf.len());
+            if buf.len() <= 20 {
+                eprintln!("Error response buffer: {:?}", buf);
+            } else {
+                eprintln!("Error response buffer (first 20 bytes): {:?}", &buf[..20]);
+            }
+            
+            match resp_type {
+                ERROR_RESPONSE => {
+                    // Try to decode as error response, but if that fails, return a generic error
+                    if buf.len() >= 4 {
+                        // Try to read error code from first 4 bytes
+                        let error_code = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                        eprintln!("Extracted error code: {}", error_code);
+                        if let Some(fluss_error) = crate::error::Error::from_protocol(error_code as i16) {
+                            Err(fluss_error)
+                        } else {
+                            Err(Error::Fluss(FlussCode::Unknown))
+                        }
+                    } else {
+                        Err(Error::Fluss(FlussCode::Unknown))
+                    }
+                }
+                SERVER_FAILURE => {
+                    eprintln!("Server failure response");
+                    Err(Error::Fluss(FlussCode::Unknown))
+                }
+                _ => {
+                    eprintln!("Unknown response type: {}", resp_type);
+                    Err(Error::Fluss(FlussCode::Unknown))
+                }
+            }
         }
     }
 }

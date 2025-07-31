@@ -83,7 +83,7 @@ impl DataType {
         }
     }
 
-    fn as_non_nullable(&self) -> Self {
+    pub fn as_non_nullable(&self) -> Self {
         match self {
             DataType::Boolean(v) => DataType::Boolean(v.as_non_nullable()),
             DataType::TinyInt(v) => DataType::TinyInt(v.as_non_nullable()),
@@ -307,6 +307,10 @@ impl CharType {
 
     pub fn as_non_nullable(&self) -> Self {
         Self::with_nullable(self.length, false)
+    }
+
+    pub fn length(&self) -> u32 {
+        self.length
     }
 }
 
@@ -603,6 +607,10 @@ impl ArrayType {
             element_type: self.element_type.clone(),
         }
     }
+
+    pub fn element_type(&self) -> &DataType {
+        &self.element_type
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Hash)]
@@ -631,6 +639,14 @@ impl MapType {
             key_type: self.key_type.clone(),
             value_type: self.value_type.clone(),
         }
+    }
+
+    pub fn key_type(&self) -> &DataType {
+        &self.key_type
+    }
+
+    pub fn value_type(&self) -> &DataType {
+        &self.value_type
     }
 }
 

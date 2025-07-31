@@ -21,3 +21,10 @@ Cargo.lock
 # Ignore Python bytecode files
 *.pyc
 __pycache__/
+
+expanded.rs
+libfluss.txt
+
+venv
+MEMORY_LAYOUT.md
+PYO3_MECHANISM.md

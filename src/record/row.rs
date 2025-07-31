@@ -78,6 +78,23 @@ impl ColumnarRow {
     pub fn set_row_id(&mut self, row_id: usize) {
         self.row_id = row_id
     }
+
+    pub fn get_schema_info(&self) -> Vec<(String, String)> {
+        self.record_batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| (field.name().clone(), format!("{:?}", field.data_type())))
+            .collect()
+    }
+
+    pub fn get_record_batch(&self) -> Arc<RecordBatch> {
+        self.record_batch.clone()
+    }
+
+    pub fn row_id(&self) -> usize {
+        self.row_id
+    }
 }
 
 impl InternalRow for ColumnarRow {

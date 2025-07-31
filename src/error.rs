@@ -44,3 +44,22 @@ pub enum FlussCode {
 
     LeaderNotAvaliable = 44,
 }
+
+impl FlussCode {
+    pub fn from_protocol(n: i16) -> Option<FlussCode> {
+        if n == 0 {
+            return None;
+        }
+
+        if n >= FlussCode::NotLeaderOrFollower as i16 && n <= FlussCode::LeaderNotAvaliable as i16 {
+            return Some(unsafe { std::mem::transmute(n as i8) });
+        }
+        Some(FlussCode::Unknown)
+    }
+}
+
+impl Error {
+    pub fn from_protocol(n: i16) -> Option<Error> {
+        FlussCode::from_protocol(n).map(Error::Fluss)
+    }
+}

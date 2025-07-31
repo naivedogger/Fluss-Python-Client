@@ -338,7 +338,7 @@ pub fn to_arrow_schema(fluss_schema: &DataType) -> SchemaRef {
             SchemaRef::new(Schema::new(fields))
         }
         _ => {
-            panic!("must be row data tyoe.")
+            panic!("must be row data type.")
         }
     }
 }

@@ -31,24 +31,7 @@ pub trait ResponseParser {
     fn parse(&self, response: Vec<u8>) -> Result<Self::T>;
 }
 
-impl FlussCode {
-    fn from_protocol(n: i16) -> Option<FlussCode> {
-        if n == 0 {
-            return None;
-        }
 
-        if n >= FlussCode::NotLeaderOrFollower as i16 && n <= FlussCode::LeaderNotAvaliable as i16 {
-            return Some(unsafe { mem::transmute(n as i8) });
-        }
-        Some(FlussCode::Unknown)
-    }
-}
-
-impl Error {
-    fn from_protocol(n: i16) -> Option<Error> {
-        FlussCode::from_protocol(n).map(Error::Fluss)
-    }
-}
 
 #[derive(Debug)]
 pub struct HeaderRequest {

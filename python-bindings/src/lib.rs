@@ -1,56 +1,48 @@
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use std::time::Duration;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use tokio::runtime::Runtime;
+use std::sync::Arc;
+use std::sync::OnceLock;
+
+// Global runtime instance
+static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+// Helper function to get or create the runtime
+fn get_runtime() -> &'static tokio::runtime::Runtime {
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Runtime::new().expect("Failed to create tokio runtime")
+    })
+}
 
 use fluss_rust::{
     args::Args,
-    connection::{ConnectionConfig, FlussConnection},
-    metadata::{TablePath, DataTypes, Schema, TableDescriptor, TableInfo, DataType},
-    admin::admin::FlussAdmin,
-    table::table::{Table, TableAppend},
-    table::scanner::{TableScan, log::LogScanner},
+    connection::{FlussConnection as RustFlussConnection, ConnectionConfig as RustConnectionConfig},
+    metadata::{TablePath as RustTablePath, Schema as RustSchema, SchemaBuilder as RustSchemaBuilder, TableDescriptor as RustTableDescriptor, TableInfo as RustTableInfo, DataType as RustDataType, Column as RustColumn, TableBucket as RustTableBucket},
+    admin::admin::FlussAdmin as RustFlussAdmin,
+    table::table::{Table as RustTable, TableAppend as RustTableAppend},
+    table::scanner::{TableScan as RustTableScan}, 
+    table::scanner::log::{LogScanner as RustLogScanner},
     record::{ScanRecord, row::InternalRow},
 };
 
 // Import Arrow types for data conversion
 use arrow::array::{ArrayRef, Int64Array, StringArray, RecordBatch, BooleanArray, Float64Array};
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+use arrow_pyarrow::{FromPyArrow, ToPyArrow};
 
-// Helper function to convert Rust DataType to Python string
-fn datatype_to_string(data_type: &DataType) -> String {
-    match data_type {
-        DataType::Boolean(_) => "boolean".to_string(),
-        DataType::TinyInt(_) => "tinyint".to_string(),
-        DataType::SmallInt(_) => "smallint".to_string(),
-        DataType::Int(_) => "int".to_string(),
-        DataType::BigInt(_) => "bigint".to_string(),
-        DataType::Float(_) => "float".to_string(),
-        DataType::Double(_) => "double".to_string(),
-        DataType::Char(_) => "string".to_string(), // Char is treated as string in Python
-        DataType::String(_) => "string".to_string(),
-        DataType::Decimal(_) => "decimal".to_string(), // Could be improved to include precision/scale
-        DataType::Date(_) => "date".to_string(),
-        DataType::Time(_) => "time".to_string(),
-        DataType::Timestamp(_) => "timestamp".to_string(),
-        DataType::TimestampLTz(_) => "timestamp_ltz".to_string(),
-        DataType::Bytes(_) => "bytes".to_string(),
-        DataType::Binary(_) => "binary".to_string(),
-        DataType::Array(_) => "array".to_string(), // Could be improved to include element type
-        DataType::Map(_) => "map".to_string(), // Could be improved to include key/value types
-        DataType::Row(_) => "row".to_string(), // Row types are complex, simplified for now
-    }
-}
+// Import our datatype module
+mod datatype;
+use datatype::{DataType, datatype_to_string};
 
 // Python wrapper for ConnectionConfig
 #[pyclass]
-pub struct PyConnectionConfig {
-    inner: ConnectionConfig,
+pub struct ConnectionConfig {
+    inner: RustConnectionConfig,
 }
 
 #[pymethods]
-impl PyConnectionConfig {
+impl ConnectionConfig {
     #[new]
     #[pyo3(signature = (bootstrap_server, rw_timeout_secs = None))]
     fn new(bootstrap_server: String, rw_timeout_secs: Option<u64>) -> Self {
@@ -59,8 +51,8 @@ impl PyConnectionConfig {
         args.bootstrap_server = bootstrap_server;
         args.rw_timeout = timeout;
         
-        PyConnectionConfig {
-            inner: ConnectionConfig::from_args(args),
+        ConnectionConfig {
+            inner: RustConnectionConfig::from_args(args),
         }
     }
     
@@ -77,16 +69,16 @@ impl PyConnectionConfig {
 
 // Python wrapper for TablePath
 #[pyclass]
-pub struct PyTablePath {
-    inner: TablePath,
+pub struct TablePath {
+    inner: RustTablePath,
 }
 
 #[pymethods]
-impl PyTablePath {
+impl TablePath {
     #[new]
     fn new(database: String, table: String) -> Self {
-        PyTablePath {
-            inner: TablePath::new(database, table),
+        TablePath {
+            inner: RustTablePath::new(database, table),
         }
     }
     
@@ -105,79 +97,94 @@ impl PyTablePath {
     }
     
     fn __repr__(&self) -> String {
-        format!("PyTablePath('{}', '{}')", self.inner.database(), self.inner.table())
+        format!("TablePath('{}', '{}')", self.inner.database(), self.inner.table())
+    }
+}
+
+impl TablePath {
+    /// Create a TablePath from a Rust TablePath
+    pub fn from_rust_table_path(rust_table_path: RustTablePath) -> Self {
+        TablePath {
+            inner: rust_table_path,
+        }
+    }
+}
+
+#[pyclass]
+pub struct Column {
+    inner: RustColumn,
+}
+
+#[pymethods]
+impl Column {
+    #[new]
+    fn new(name: String, data_type: &DataType) -> Self {
+        Column {
+            inner: RustColumn::new(&name, data_type.inner.clone()),
+        }
+    }
+
+    fn with_comment(&self, comment: String) -> Self {
+        Column {
+            inner: self.inner.clone().with_comment(&comment),
+        }
+    }
+    
+    fn with_data_type(&self, data_type: &DataType) -> Self {
+        Column {
+            inner: self.inner.with_data_type(data_type.inner.clone()),
+        }
+    }
+    
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name().to_string()
+    }
+    
+    #[getter]
+    fn data_type(&self) -> DataType {
+        DataType::from_inner(self.inner.data_type().clone())
+    }
+    
+    fn __str__(&self) -> String {
+        format!("Column(name='{}', type='{}')", self.name(), datatype_to_string(&self.data_type().inner))
     }
 }
 
 // Python wrapper for Schema
 #[pyclass]
-pub struct PySchema {
-    inner: Schema,
+pub struct Schema {
+    inner: RustSchema,
     // Store column information for easy access
-    columns: Vec<(String, String)>,
+    columns: Vec<(String, DataType)>,
 }
 
 #[pymethods]
-impl PySchema {
+impl Schema {
     #[new]
-    fn new() -> Self {
-        PySchema {
-            inner: Schema::builder().build(),
-            columns: Vec::new(),
+    #[pyo3(signature = (columns = None))]
+    fn new(columns: Option<Vec<(String, Bound<'_, PyAny>)>>) -> PyResult<Self> {
+        let mut column_data = Vec::new();
+        let mut builder = RustSchemaBuilder::new();
+        
+        if let Some(cols) = columns {
+            for (name, dtype_obj) in cols {
+                // Extract DataType from PyAny
+                let dtype: DataType = dtype_obj.extract()?;
+                column_data.push((name.clone(), dtype.clone()));
+                builder = builder.column(&name, dtype.inner.clone());
+            }
         }
+        
+        Ok(Schema {
+            inner: builder.build(),
+            columns: column_data,
+        })
     }
     
-    fn add_column(&mut self, name: String, data_type: String) -> PyResult<()> {
-        let _dt = match data_type.as_str() {
-            "int" => DataTypes::int(),
-            "string" => DataTypes::string(),
-            "bigint" => DataTypes::bigint(),
-            "float" => DataTypes::float(),
-            "double" => DataTypes::double(),
-            "boolean" => DataTypes::boolean(),
-            "tinyint" => DataTypes::tinyint(),
-            "smallint" => DataTypes::smallint(),
-            "bytes" => DataTypes::bytes(),
-            "date" => DataTypes::date(),
-            "time" => DataTypes::time(),
-            "timestamp" => DataTypes::timestamp(),
-            "timestamp_ltz" => DataTypes::timestamp_ltz(),
-            _ => {
-                // Try to parse complex types like decimal(10,2), char(255), etc.
-                if data_type.starts_with("decimal(") && data_type.ends_with(")") {
-                    let params = &data_type[8..data_type.len()-1];
-                    let parts: Vec<&str> = params.split(',').collect();
-                    if parts.len() == 2 {
-                        let precision = parts[0].trim().parse::<u32>().map_err(|_| 
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid decimal precision"))?;
-                        let scale = parts[1].trim().parse::<u32>().map_err(|_| 
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid decimal scale"))?;
-                        DataTypes::decimal(precision, scale)
-                    } else {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            "Invalid decimal format. Use decimal(precision,scale)"
-                        ));
-                    }
-                } else if data_type.starts_with("char(") && data_type.ends_with(")") {
-                    let length_str = &data_type[5..data_type.len()-1];
-                    let length = length_str.parse::<u32>().map_err(|_| 
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid char length"))?;
-                    DataTypes::char(length)
-                } else if data_type.starts_with("binary(") && data_type.ends_with(")") {
-                    let length_str = &data_type[7..data_type.len()-1];
-                    let length = length_str.parse::<usize>().map_err(|_| 
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid binary length"))?;
-                    DataTypes::binary(length)
-                } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("Unsupported data type: {}", data_type)
-                    ));
-                }
-            }
-        };
-        
+    fn add_column(&mut self, name: String, data_type: &DataType) -> PyResult<()> {
         // Add to columns list
-        self.columns.push((name.clone(), data_type));
+        self.columns.push((name.clone(), data_type.clone()));
         
         // Rebuild the schema with all columns
         self.rebuild_schema()?;
@@ -185,7 +192,7 @@ impl PySchema {
     }
     
     fn get_columns(&self) -> Vec<(String, String)> {
-        self.columns.clone()
+        self.columns.iter().map(|(name, dtype)| (name.clone(), datatype_to_string(&dtype.inner))).collect()
     }
     
     fn get_column_names(&self) -> Vec<String> {
@@ -195,7 +202,7 @@ impl PySchema {
     fn get_column_type(&self, column_name: &str) -> Option<String> {
         self.columns.iter()
             .find(|(name, _)| name == column_name)
-            .map(|(_, dtype)| dtype.clone())
+            .map(|(_, dtype)| datatype_to_string(&dtype.inner))
     }
     
     fn column_count(&self) -> usize {
@@ -204,123 +211,166 @@ impl PySchema {
     
     // Helper method to rebuild schema from all columns
     fn rebuild_schema(&mut self) -> PyResult<()> {
-        let mut builder = Schema::builder();
-        
+        let mut builder = RustSchemaBuilder::new();
         for (name, data_type) in &self.columns {
-            let dt = match data_type.as_str() {
-                "int" => DataTypes::int(),
-                "string" => DataTypes::string(),
-                "bigint" => DataTypes::bigint(),
-                "float" => DataTypes::float(),
-                "double" => DataTypes::double(),
-                "boolean" => DataTypes::boolean(),
-                "tinyint" => DataTypes::tinyint(),
-                "smallint" => DataTypes::smallint(),
-                "bytes" => DataTypes::bytes(),
-                "date" => DataTypes::date(),
-                "time" => DataTypes::time(),
-                "timestamp" => DataTypes::timestamp(),
-                "timestamp_ltz" => DataTypes::timestamp_ltz(),
-                _ => {
-                    // Handle complex types
-                    if data_type.starts_with("decimal(") && data_type.ends_with(")") {
-                        let params = &data_type[8..data_type.len()-1];
-                        let parts: Vec<&str> = params.split(',').collect();
-                        if parts.len() == 2 {
-                            let precision = parts[0].trim().parse::<u32>().map_err(|_| 
-                                PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid decimal precision"))?;
-                            let scale = parts[1].trim().parse::<u32>().map_err(|_| 
-                                PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid decimal scale"))?;
-                            DataTypes::decimal(precision, scale)
-                        } else {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                "Invalid decimal format. Use decimal(precision,scale)"
-                            ));
-                        }
-                    } else if data_type.starts_with("char(") && data_type.ends_with(")") {
-                        let length_str = &data_type[5..data_type.len()-1];
-                        let length = length_str.parse::<u32>().map_err(|_| 
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid char length"))?;
-                        DataTypes::char(length)
-                    } else if data_type.starts_with("binary(") && data_type.ends_with(")") {
-                        let length_str = &data_type[7..data_type.len()-1];
-                        let length = length_str.parse::<usize>().map_err(|_| 
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid binary length"))?;
-                        DataTypes::binary(length)
-                    } else {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            format!("Unsupported data type: {}", data_type)
-                        ));
-                    }
-                }
-            };
-            
-            builder = builder.column(name, dt);
+            builder = builder.column(name, data_type.inner.clone());
         }
-        
         self.inner = builder.build();
         Ok(())
     }
     
     fn __str__(&self) -> String {
-        format!("PySchema(columns={})", self.columns.len())
+        format!("Schema: columns={:?}", self.get_columns())
+    }
+}
+
+impl Schema {
+    /// Internal method to create a Schema from a Rust Schema
+    pub fn from_inner(rust_schema: RustSchema) -> Self {
+        let mut columns = Vec::new();
+        for column in rust_schema.columns() {
+            let column_name = column.name().to_string();
+            let column_type = DataType::from_inner(column.data_type().clone());
+            columns.push((column_name, column_type));
+        }
+        
+        Schema {
+            inner: rust_schema,
+            columns,
+        }
     }
 }
 
 // Python wrapper for TableDescriptor
 #[pyclass]
-pub struct PyTableDescriptor {
-    inner: TableDescriptor,
+pub struct TableDescriptor {
+    inner: RustTableDescriptor,
+    schema: RustSchema,
+    comment: Option<String>,
+    partition_keys: Vec<String>,
+    bucket_count: Option<i32>,
+    bucket_keys: Vec<String>,
+    properties: HashMap<String, String>,
+    custom_properties: HashMap<String, String>,
 }
 
 #[pymethods]
-impl PyTableDescriptor {
+impl TableDescriptor {
     #[new]
-    fn new(schema: &PySchema) -> Self {
-        PyTableDescriptor {
-            inner: TableDescriptor::builder()
-                .schema(schema.inner.clone())
-                .build(),
+    fn new(schema: &Schema) -> Self {
+        let builder = RustTableDescriptor::builder().schema(schema.inner.clone());
+        let inner = builder.build();
+        TableDescriptor {
+            inner,
+            schema: schema.inner.clone(),
+            comment: None,
+            partition_keys: Vec::new(),
+            bucket_count: None,
+            bucket_keys: Vec::new(),
+            properties: HashMap::new(),
+            custom_properties: HashMap::new(),
         }
+    }
+
+    fn comment(&mut self, comment: String) {
+        self.comment = Some(comment);
+        self.rebuild_inner();
+    }
+
+    fn partition_by(&mut self, partition_keys: Vec<String>) {
+        self.partition_keys = partition_keys;
+        self.rebuild_inner();
+    }
+
+    fn distributed_by(&mut self, bucket_count: Option<i32>, bucket_keys: Vec<String>) {
+        self.bucket_count = bucket_count;
+        self.bucket_keys = bucket_keys;
+        self.rebuild_inner();
+    }
+
+    fn log_format(&mut self, _log_format: String) {
+        // TODO: need to convert String into LogFormat enum
+        // For now, this is a no-op until LogFormat is properly implemented
+    }
+
+    fn kv_format(&mut self, _kv_format: String) {
+        // TODO: need to convert String into KVFormat enum
+        // For now, this is a no-op until KVFormat is properly implemented
+    }
+
+    fn property(&mut self, key: &str, value: String) {
+        self.properties.insert(key.to_string(), value);
+        self.rebuild_inner();
+    }
+
+    fn properties(&mut self, properties: HashMap<String, String>) {
+        self.properties.extend(properties);
+        self.rebuild_inner();
+    }
+
+    fn custom_property(&mut self, key: &str, value: &str) {
+        self.custom_properties.insert(key.to_string(), value.to_string());
+        self.rebuild_inner();
+    }
+
+    fn custom_properties(&mut self, properties: HashMap<String, String>) {
+        self.custom_properties.extend(properties);
+        self.rebuild_inner();
     }
     
     fn __str__(&self) -> String {
-        format!("PyTableDescriptor")
+        // Convert RustSchema to our Python Schema for display
+        let py_schema = Schema::from_inner(self.schema.clone());
+        
+        format!("TableDescriptor: {}, partition_keys={:?}, bucket_count={:?}, bucket_keys={:?}, properties={:?}, custom_properties={:?}",
+            py_schema.__str__(), self.partition_keys, self.bucket_count, self.bucket_keys, self.properties, self.custom_properties)
+    }
+}
+
+impl TableDescriptor {
+    fn rebuild_inner(&mut self) {
+        let mut builder = RustTableDescriptor::builder()
+            .schema(self.schema.clone())
+            .partitioned_by(self.partition_keys.clone())
+            .properties(self.properties.clone())
+            .custom_properties(self.custom_properties.clone());
+
+        if let Some(ref comment) = self.comment {
+            builder = builder.comment(comment);
+        }
+
+        if !self.bucket_keys.is_empty() {
+            builder = builder.distributed_by(self.bucket_count, self.bucket_keys.clone());
+        }
+
+        self.inner = builder.build();
     }
 }
 
 // Python wrapper for FlussConnection
 #[pyclass]
-pub struct PyFlussConnection {
-    runtime: Runtime,
-    connection: Option<FlussConnection>,
-    config: ConnectionConfig,
+pub struct FlussConnection {
+    connection: Option<RustFlussConnection>,
+    config: RustConnectionConfig,
 }
 
 #[pymethods]
-impl PyFlussConnection {
-    #[staticmethod]
-    fn new(config: &PyConnectionConfig) -> PyResult<Self> {
-        let runtime = Runtime::new()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                format!("Failed to create tokio runtime: {}", e)
-            ))?;
-        
+impl FlussConnection {
+    #[new]
+    fn new(config: &ConnectionConfig) -> PyResult<Self> {
         let connection_config = config.inner.clone();
         
-        // 尝试创建连接，添加超时机制
-        let connection = runtime.block_on(async {
-            // 添加超时机制，避免无限等待
+        // Use global runtime to execute async operation
+        let connection = get_runtime().block_on(async {
             let timeout_duration = std::time::Duration::from_secs(10);
-            match tokio::time::timeout(timeout_duration, FlussConnection::new(connection_config.clone())).await {
+            match tokio::time::timeout(timeout_duration, RustFlussConnection::new(connection_config.clone())).await {
                 Ok(conn) => Ok(conn),
                 Err(_) => Err("Failed to create FlussConnection: timeout after 10 seconds".to_string()),
             }
         });
         
         match connection {
-            Ok(conn) => Ok(PyFlussConnection {
-                runtime,
+            Ok(conn) => Ok(FlussConnection {
                 connection: Some(conn),
                 config: connection_config,
             }),
@@ -328,10 +378,10 @@ impl PyFlussConnection {
         }
     }
     
-    fn get_admin(&self) -> PyResult<PyFlussAdmin> {
+    fn get_admin(&self) -> PyResult<FlussAdmin> {
         if let Some(ref conn) = self.connection {
             let admin = conn.get_admin();
-            Ok(PyFlussAdmin::new_with_real_admin(admin))
+            Ok(FlussAdmin::from_rust_admin(admin))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "No connection available - connection may have failed during initialization"
@@ -339,14 +389,14 @@ impl PyFlussConnection {
         }
     }
     
-    fn get_table(&self, table_path: &PyTablePath) -> PyResult<PyTable> {
+    fn get_table(&self, table_path: &TablePath) -> PyResult<Table> {
         if let Some(ref conn) = self.connection {
             let table_path_rust = table_path.inner.clone();
-            let table = self.runtime.block_on(async {
+            let table = get_runtime().block_on(async {
                 conn.get_table(&table_path_rust).await
             });
             
-            Ok(PyTable::new_with_real_table(table, table_path))
+            Ok(Table::from_rust_table(table, table_path))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "No connection available - connection may have failed during initialization"
@@ -359,35 +409,32 @@ impl PyFlussConnection {
     }
     
     fn close(&self) -> PyResult<()> {
-        // 在真实实现中，这里会关闭连接
-        // 现在只是占位符
+        // TODO: Implement connection close
         Ok(())
     }
 }
 
 // Python wrapper for FlussAdmin
 #[pyclass]
-pub struct PyFlussAdmin {
-    runtime: Option<Runtime>,
-    admin: Option<FlussAdmin>,
+pub struct FlussAdmin {
+    admin: Option<RustFlussAdmin>,
 }
 
 #[pymethods]
-impl PyFlussAdmin {
+impl FlussAdmin {
     #[new]
     fn new() -> Self {
-        PyFlussAdmin {
-            runtime: None,
+        FlussAdmin {
             admin: None,
         }
     }
     
-    fn create_table(&self, table_path: &PyTablePath, descriptor: &PyTableDescriptor, ignore_if_exists: bool) -> PyResult<()> {
-        if let (Some(runtime), Some(admin)) = (&self.runtime, &self.admin) {
+    fn create_table(&self, table_path: &TablePath, descriptor: &TableDescriptor, ignore_if_exists: bool) -> PyResult<()> {
+        if let Some(admin) = &self.admin {
             let table_path_rust = table_path.inner.clone();
             let descriptor_rust = descriptor.inner.clone();
             
-            runtime.block_on(async {
+            get_runtime().block_on(async {
                 admin.create_table(&table_path_rust, &descriptor_rust, ignore_if_exists).await
             }).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 format!("Failed to create table: {}", e)
@@ -395,74 +442,46 @@ impl PyFlussAdmin {
             
             println!("Table {} created successfully", table_path.__str__());
         } else {
-            // 占位符实现
-            println!("Creating table: {} (ignore_if_exists: {})", table_path.__str__(), ignore_if_exists);
+            // TODO: Implement create_table without real admin connection
         }
         Ok(())
     }
     
-    fn drop_table(&self, table_path: &PyTablePath, ignore_if_not_exists: bool) -> PyResult<()> {
-        // todo: 目前暂未实现
-        if let (Some(runtime), Some(admin)) = (&self.runtime, &self.admin) {
-            let table_path_rust = table_path.inner.clone();
-            
-            // Check if table exists before attempting to drop
-            let table_exists = runtime.block_on(async {
-                match admin.get_table(&table_path_rust).await {
-                    Ok(_) => true,
-                    Err(_) => false,
-                }
-            });
-            
-            if !table_exists && !ignore_if_not_exists {
-                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    format!("Table {} does not exist", table_path.__str__())
-                ));
-            }
-            
-            if table_exists {
-                println!("WARNING: drop_table is not implemented in Fluss server yet.");
-                println!("Table {} cannot be dropped. Consider using a different table name.", table_path.__str__());
-                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                    "drop_table is not implemented in Fluss server yet"
-                ));
-            }
-        } else {
-            // 占位符实现
-            println!("WARNING: drop_table is not implemented in Fluss server yet.");
-            println!("Table {} cannot be dropped. Consider using a different table name.", table_path.__str__());
-        }
+    fn drop_table(&self, table_path: &TablePath, ignore_if_not_exists: bool) -> PyResult<()> {
+        // TODO: Implement drop_table when available in Fluss server
         Ok(())
     }
     
-    fn get_table(&self, table_path: &PyTablePath) -> PyResult<PyTableInfo> {
-        if let (Some(runtime), Some(admin)) = (&self.runtime, &self.admin) {
+    fn get_table(&self, table_path: &TablePath) -> PyResult<TableInfo> {
+        if let Some(admin) = &self.admin {
             let table_path_rust = table_path.inner.clone();
             
-            let table_info = runtime.block_on(async {
+            let table_info = get_runtime().block_on(async {
                 admin.get_table(&table_path_rust).await
             }).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 format!("Failed to get table: {}", e)
             ))?;
             
-            Ok(PyTableInfo::new_from_real_table_info(table_info))
+            Ok(TableInfo::from_rust_table_info(table_info))
         } else {
-            // 占位符实现
-            Ok(PyTableInfo::new(table_path))
+            // TODO: exception handling for no admin connection
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No admin connection available - cannot get table info"
+            ))
         }
     }
     
     fn list_tables(&self, database: Option<String>) -> PyResult<Vec<String>> {
-        // 目前Fluss还没有list_tables的API，所以这里仍然是占位符
+        // TODO: Implement list_tables API when available in Fluss server
         let db = database.unwrap_or_else(|| "default".to_string());
         Ok(vec![format!("{}.table1", db), format!("{}.table2", db)])
     }
     
-    fn table_exists(&self, table_path: &PyTablePath) -> PyResult<bool> {
-        if let (Some(runtime), Some(admin)) = (&self.runtime, &self.admin) {
+    fn table_exists(&self, table_path: &TablePath) -> PyResult<bool> {
+        if let Some(admin) = &self.admin {
             let table_path_rust = table_path.inner.clone();
             
-            let exists = runtime.block_on(async {
+            let exists = get_runtime().block_on(async {
                 match admin.get_table(&table_path_rust).await {
                     Ok(_) => true,
                     Err(_) => false,
@@ -471,17 +490,15 @@ impl PyFlussAdmin {
             
             Ok(exists)
         } else {
-            // 占位符实现
+            // TODO: handle exception
             Ok(true)
         }
     }
 }
 
-impl PyFlussAdmin {
-    pub fn new_with_real_admin(admin: FlussAdmin) -> Self {
-        let runtime = Runtime::new().ok();
-        PyFlussAdmin {
-            runtime,
+impl FlussAdmin {
+    pub fn from_rust_admin(admin: RustFlussAdmin) -> Self {
+        FlussAdmin {
             admin: Some(admin),
         }
     }
@@ -489,89 +506,70 @@ impl PyFlussAdmin {
 
 // Python wrapper for Table
 #[pyclass]
-pub struct PyTable {
-    table_path: TablePath,
-    runtime: Option<Runtime>,
-    table: Option<Table>,
+pub struct Table {
+    table_path: RustTablePath,
+    table: Option<RustTable>,
 }
 
 #[pymethods]
-impl PyTable {
+impl Table {
     #[new]
-    fn new(table_path: &PyTablePath) -> Self {
-        PyTable { 
+    fn new(table_path: &TablePath) -> Self {
+        Table { 
             table_path: table_path.inner.clone(),
-            runtime: None,
             table: None,
         }
     }
     
-    fn get_path(&self) -> PyTablePath {
-        PyTablePath { inner: self.table_path.clone() }
+    fn get_path(&self) -> TablePath {
+        TablePath { inner: self.table_path.clone() }
     }
     
-    fn new_append(&self) -> PyAppendWriter {
-        if let (Some(runtime), Some(table)) = (&self.runtime, &self.table) {
+    // java client 那边，newAppend 之后还要 createWriter
+    fn new_append(&self) -> AppendWriter {
+        if let Some(table) = &self.table {
             let table_append = table.new_append();
             let table_info = table.get_table_info();
             let schema = table_info.schema.clone();
-            PyAppendWriter::new_with_real_append(table_append, runtime, Some(schema))
+            AppendWriter::from_rust_append(table_append, Some(schema))
         } else {
-            PyAppendWriter::new(&PyTablePath { inner: self.table_path.clone() })
+            AppendWriter::new(&TablePath { inner: self.table_path.clone() })
         }
     }
     
-    fn new_scan(&self) -> PyLogScanner {
-        if let (Some(runtime), Some(table)) = (&self.runtime, &self.table) {
+    fn new_scan(&self) -> PyResult<TableScan> {
+        if let Some(table) = &self.table {
             let table_scan = table.new_scan();
-            let mut scanner = PyLogScanner::new_with_real_scan(table_scan, runtime);
-            
-            // Set schema information from table
-            if let Ok(schema) = self.get_schema() {
-                scanner.set_schema_info(schema.get_columns());
-            }
-            
-            scanner
+            let schema = table.get_table_info().schema.clone();
+            Ok(TableScan::from_rust_table_scan(table_scan, schema))
         } else {
-            PyLogScanner::new(&PyTablePath { inner: self.table_path.clone() })
+            // handle error
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No active table connection - please ensure connection is established before scanning"
+            ))
         }
     }
     
-    fn new_batch_scan(&self) -> PyBatchScanner {
-        // 目前Fluss可能还没有batch scan的API，所以这里仍然是占位符
-        PyBatchScanner::new(&PyTablePath { inner: self.table_path.clone() })
-    }
-    
-    fn get_schema(&self) -> PyResult<PySchema> {
-        if let (Some(_runtime), Some(table)) = (&self.runtime, &self.table) {
+    fn get_schema(&self) -> PyResult<Schema> {
+        if let Some(table) = &self.table {
             let table_info = table.get_table_info();
             
-            // 从真实的TableInfo.schema中提取列信息
-            let mut schema = PySchema::new();
-            for column in table_info.schema.columns() {
-                let column_name = column.name().to_string();
-                let column_type = datatype_to_string(column.data_type());
-                schema.add_column(column_name, column_type)?;
-            }
+            // Clone the schema and create Python wrapper directly
+            let schema = Schema::from_inner(table_info.schema.clone());
             
             Ok(schema)
         } else {
-            // 占位符实现
-            let mut schema = PySchema::new();
-            schema.add_column("id".to_string(), "bigint".to_string())?;
-            schema.add_column("name".to_string(), "string".to_string())?;
-            schema.add_column("age".to_string(), "int".to_string())?;
+            // TODO: handle exception
+            let schema = Schema::new(None)?;
             Ok(schema)
         }
     }
 }
 
-impl PyTable {
-    pub fn new_with_real_table(table: Table, table_path: &PyTablePath) -> Self {
-        let runtime = Runtime::new().ok();
-        PyTable {
+impl Table {
+    pub fn from_rust_table(table: RustTable, table_path: &TablePath) -> Self {
+        Table {
             table_path: table_path.inner.clone(),
-            runtime,
             table: Some(table),
         }
     }
@@ -579,80 +577,52 @@ impl PyTable {
 
 // Python wrapper for TableInfo
 #[pyclass]
-pub struct PyTableInfo {
-    table_path: TablePath,
-    created_at: String,
-    row_count: u64,
-    // 添加对真实TableInfo的引用
-    real_table_info: Option<TableInfo>,
+pub struct TableInfo {
+    inner: RustTableInfo,
 }
 
 #[pymethods]
-impl PyTableInfo {
-    #[new]
-    fn new(table_path: &PyTablePath) -> Self {
-        PyTableInfo {
-            table_path: table_path.inner.clone(),
-            created_at: "2025-01-01T00:00:00Z".to_string(),
-            row_count: 0,
-            real_table_info: None,
-        }
-    }
+impl TableInfo {
     
-    fn get_path(&self) -> PyTablePath {
-        PyTablePath { inner: self.table_path.clone() }
-    }
-    
-    #[getter]
-    fn created_at(&self) -> String {
-        self.created_at.clone()
-    }
-    
-    #[getter]
-    fn row_count(&self) -> u64 {
-        self.row_count
+    fn get_table_path(&self) -> TablePath {
+        TablePath::from_rust_table_path(self.inner.get_table_path().clone())
     }
     
     fn __str__(&self) -> String {
-        format!("TableInfo(path={}, created_at={}, row_count={})", 
-                self.table_path.database(), self.created_at, self.row_count)
+        format!("TableInfo(path={})", 
+                self.get_table_path().database())
     }
 }
 
-impl PyTableInfo {
-    pub fn new_from_real_table_info(table_info: TableInfo) -> Self {
-        PyTableInfo {
-            table_path: table_info.table_path.clone(),
-            created_at: "2025-01-01T00:00:00Z".to_string(), // 需要从real_table_info中获取
-            row_count: 0, // 需要从real_table_info中获取
-            real_table_info: Some(table_info),
+impl TableInfo {
+    pub fn from_rust_table_info(table_info: RustTableInfo) -> Self {
+        TableInfo {
+            inner: table_info,
         }
     }
 }
 
 // Python wrapper for AppendWriter
 #[pyclass]
-pub struct PyAppendWriter {
-    table_path: TablePath,
-    runtime: Option<Runtime>,
-    table_append: Option<TableAppend>,
-    schema: Option<Schema>,
+pub struct AppendWriter {
+    table_path: RustTablePath,
+    table_append: Option<RustTableAppend>,
+    schema: Option<RustSchema>,
 }
 
 #[pymethods]
-impl PyAppendWriter {
+impl AppendWriter {
     #[new]
-    fn new(table_path: &PyTablePath) -> Self {
-        PyAppendWriter { 
+    fn new(table_path: &TablePath) -> Self {
+        AppendWriter { 
             table_path: table_path.inner.clone(),
-            runtime: None,
             table_append: None,
             schema: None,
         }
     }
     
-    fn append_row(&self, row_data: HashMap<String, PyObject>) -> PyResult<PyWriteResult> {
-        if let (Some(runtime), Some(table_append)) = (&self.runtime, &self.table_append) {
+    fn append(&self, row_data: HashMap<String, PyObject>) -> PyResult<()> {
+        if let Some(table_append) = &self.table_append {
             // Convert single row to batch format
             let batch_data = vec![row_data];
             
@@ -661,83 +631,86 @@ impl PyAppendWriter {
             
             // Create writer and append
             let writer = table_append.create_writer();
-            let result = runtime.block_on(async {
+            let result = get_runtime().block_on(async {
                 writer.append(record_batch).await
             });
             
             match result {
-                Ok(_) => Ok(PyWriteResult::new(1)),
+                Ok(_) => Ok(()),
                 Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                     format!("Failed to append row: {}", e)
                 ))
             }
         } else {
-            // 占位符实现
-            println!("Appending row to {}: {:?}", self.table_path.database(), row_data.keys().collect::<Vec<_>>());
-            Ok(PyWriteResult::new(1))
+            // exception
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No active table connection - please ensure connection is established before writing"
+            ))
         }
     }
     
-    fn append_batch(&self, batch_data: Vec<HashMap<String, PyObject>>) -> PyResult<PyWriteResult> {
-        if let (Some(runtime), Some(table_append)) = (&self.runtime, &self.table_append) {
-            if batch_data.is_empty() {
-                return Ok(PyWriteResult::new(0));
-            }
+    // support both Pyarrow RecordBatch and list of dictionaries
+    fn append_batch(&self, batch_data: &Bound<'_, PyAny>) -> PyResult<()> {
+        if let Some(table_append) = &self.table_append {
+            // Try to use Arrow FFI first (zero-copy for PyArrow RecordBatch)
+            let record_batch = if self.is_arrow_record_batch(batch_data)? {
+                // Use Arrow FFI to directly convert PyArrow RecordBatch to Rust RecordBatch
+                RecordBatch::from_pyarrow_bound(batch_data).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        format!("Failed to convert PyArrow RecordBatch via FFI: {}", e)
+                    )
+                })?
+            } else {
+                // Fallback: assume it's a list of dictionaries
+                let dict_data: Vec<HashMap<String, PyObject>> = batch_data.extract()?;
+                if dict_data.is_empty() {
+                    return Ok(());
+                }
+                self.convert_to_record_batch(&dict_data)?
+            };
             
-            // Convert to RecordBatch
-            let record_batch = self.convert_to_record_batch(&batch_data)?;
+            if record_batch.num_rows() == 0 {
+                return Ok(());
+            }
             
             // Create writer and append
             let writer = table_append.create_writer();
-            let result = runtime.block_on(async {
+            let result = get_runtime().block_on(async {
                 writer.append(record_batch).await
             });
             
             match result {
-                Ok(_) => Ok(PyWriteResult::new(batch_data.len() as u64)),
+                Ok(_) => Ok(()),
                 Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                     format!("Failed to append batch: {}", e)
                 ))
             }
         } else {
-            // 占位符实现
-            println!("Appending batch of {} rows to {}", batch_data.len(), self.table_path.database());
-            Ok(PyWriteResult::new(batch_data.len() as u64))
+            Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No active table connection - please ensure connection is established before writing"
+            ))
         }
     }
     
     fn flush(&self) -> PyResult<()> {
-        // 在 Rust 端，append 操作通常会自动处理 flush
-        // 这里只是打印日志表示 flush 完成
-        println!("Flushing writer for {}", self.table_path.database());
+        // TODO: Implement flush for append writer
         Ok(())
     }
     
     fn close(&self) -> PyResult<()> {
-        if let (Some(_runtime), Some(_table_append)) = (&self.runtime, &self.table_append) {
-            // 真实实现的尝试
-            println!("Attempting real close for {}", self.table_path.database());
-            // TODO: 实现真正的close
+        if let Some(_table_append) = &self.table_append {
+            // TODO: Implement close with real table append
         } else {
-            // 占位符实现
-            println!("Closing writer for {}", self.table_path.database());
+            // TODO: Implement close without real table append
         }
         Ok(())
     }
-    
-    fn create_writer(&self) -> PyWriterInstance {
-        PyWriterInstance::new(self)
-    }
 }
 
-impl PyAppendWriter {
-    pub fn new_with_real_append(table_append: TableAppend, runtime: &Runtime, schema: Option<Schema>) -> Self {
-        // Since we can't clone Runtime, we need to create a new one
-        // This is a limitation of the current design
-        let new_runtime = Runtime::new().unwrap_or_else(|_| panic!("Failed to create runtime"));
-        PyAppendWriter {
-            table_path: TablePath::new("real_table".to_string(), "initialized".to_string()),
-            runtime: Some(new_runtime),
+impl AppendWriter {
+    pub fn from_rust_append(table_append: RustTableAppend, schema: Option<RustSchema>) -> Self {
+        AppendWriter {
+            table_path: RustTablePath::new("real_table".to_string(), "initialized".to_string()),
             table_append: Some(table_append),
             schema,
         }
@@ -761,14 +734,14 @@ impl PyAppendWriter {
                 
                 // Convert fluss DataType to Arrow DataType
                 let arrow_type = match column_type {
-                    DataType::Boolean(_) => ArrowDataType::Boolean,
-                    DataType::TinyInt(_) => ArrowDataType::Int8,
-                    DataType::SmallInt(_) => ArrowDataType::Int16,
-                    DataType::Int(_) => ArrowDataType::Int32,
-                    DataType::BigInt(_) => ArrowDataType::Int64,
-                    DataType::Float(_) => ArrowDataType::Float32,
-                    DataType::Double(_) => ArrowDataType::Float64,
-                    DataType::String(_) | DataType::Char(_) => ArrowDataType::Utf8,
+                    RustDataType::Boolean(_) => ArrowDataType::Boolean,
+                    RustDataType::TinyInt(_) => ArrowDataType::Int8,
+                    RustDataType::SmallInt(_) => ArrowDataType::Int16,
+                    RustDataType::Int(_) => ArrowDataType::Int32,
+                    RustDataType::BigInt(_) => ArrowDataType::Int64,
+                    RustDataType::Float(_) => ArrowDataType::Float32,
+                    RustDataType::Double(_) => ArrowDataType::Float64,
+                    RustDataType::String(_) | RustDataType::Char(_) => ArrowDataType::Utf8,
                     _ => ArrowDataType::Utf8, // Default to string for complex types
                 };
                 
@@ -950,188 +923,154 @@ impl PyAppendWriter {
                 format!("Failed to create RecordBatch: {}", e)
             ))
     }
+    
+    // Helper function to check if object is a PyArrow RecordBatch
+    fn is_arrow_record_batch(&self, py_object: &Bound<'_, PyAny>) -> PyResult<bool> {
+        Python::with_gil(|py| {
+            // Try to import pyarrow and check if object is a RecordBatch
+            match py.import("pyarrow") {
+                Ok(pyarrow) => {
+                    let record_batch_type = pyarrow.getattr("RecordBatch")?;
+                    Ok(py_object.is_instance(&record_batch_type)?)
+                }
+                Err(_) => Ok(false), // PyArrow not available
+            }
+        })
+    }
 }
 
-// Python wrapper for WriteResult
-#[pyclass]
-pub struct PyWriteResult {
-    rows_written: u64,
-    offset: u64,
+#[pyclass(unsendable)]
+pub struct TableScan {
+    inner: RustTableScan,
+    schema: RustSchema,
 }
 
 #[pymethods]
-impl PyWriteResult {
-    #[new]
-    fn new(rows_written: u64) -> Self {
-        PyWriteResult {
-            rows_written,
-            offset: 12345, // 占位符
+impl TableScan {
+    fn create_log_scanner(&self) -> LogScanner {
+        let rust_log_scanner = self.inner.create_log_scanner();
+        // Extract schema info from table_info for the LogScanner
+        LogScanner::from_rust_log_scan(rust_log_scanner, self.schema.clone())
+    }
+}
+
+impl TableScan {
+    pub fn from_rust_table_scan(rust_scan: RustTableScan, schema: RustSchema) -> Self {
+        TableScan {
+            inner: rust_scan,
+            schema: schema,
         }
     }
+}
+
+#[pyclass]
+pub struct TableBucket {
+    inner: RustTableBucket,
+}
+
+#[pymethods]
+impl TableBucket {
+    #[new]
+    fn new(table_id: i64, bucket_id: i32) -> Self {
+        TableBucket {
+            inner: RustTableBucket::new(table_id, bucket_id),
+        }
+    }
+
+    #[getter]
+    fn table_id(&self) -> i64 {
+        self.inner.table_id()
+    } 
     
     #[getter]
-    fn rows_written(&self) -> u64 {
-        self.rows_written
+    fn bucket_id(&self) -> i32 {
+        self.inner.bucket_id()
     }
     
     #[getter]
-    fn offset(&self) -> u64 {
-        self.offset
+    fn partition_id(&self) -> Option<i64> {
+        self.inner.partition_id()
     }
     
     fn __str__(&self) -> String {
-        format!("WriteResult(rows_written={}, offset={})", self.rows_written, self.offset)
+        format!("TableBucket(table_id={}, bucket_id={})", 
+                self.table_id(), self.bucket_id())
     }
 }
 
 // Python wrapper for LogScanner
-#[pyclass]
-pub struct PyLogScanner {
-    table_path: TablePath,
-    runtime: Option<Runtime>,
-    table_scan: Option<TableScan>,
-    // Store schema information for data conversion
-    schema_info: Vec<(String, String)>,
-    // Store subscription state
-    subscribed_bucket: Option<i32>,
-    subscribed_offset: Option<i64>,
+#[pyclass(unsendable)]
+pub struct LogScanner {
+    inner: RustLogScanner,
+    schema: RustSchema,
 }
 
 #[pymethods]
-impl PyLogScanner {
-    #[new]
-    fn new(table_path: &PyTablePath) -> Self {
-        PyLogScanner { 
-            table_path: table_path.inner.clone(),
-            runtime: None,
-            table_scan: None,
-            schema_info: vec![
-                ("id".to_string(), "bigint".to_string()),
-                ("name".to_string(), "string".to_string()),
-                ("age".to_string(), "int".to_string()),
-            ],
-            subscribed_bucket: None,
-            subscribed_offset: None,
-        }
-    }
-    
+impl LogScanner {
     fn subscribe(&mut self, bucket: i32, offset: i64) -> PyResult<()> {
-        if let (Some(_runtime), Some(_table_scan)) = (&self.runtime, &self.table_scan) {
-            // Store subscription state for later use
-            self.subscribed_bucket = Some(bucket);
-            self.subscribed_offset = Some(offset);
-            
-            println!("Subscribed to bucket {} at offset {} for {}", bucket, offset, self.table_path.database());
-        } else {
-            // 占位符实现
-            println!("Subscribing to bucket {} at offset {} for {}", bucket, offset, self.table_path.database());
-        }
-        Ok(())
+        get_runtime().block_on(async {
+            self.inner.subscribe(bucket, offset).await;
+            Ok(())
+        })
     }
     
-    fn poll(&self, timeout_secs: u64) -> PyResult<Vec<PyLogRecord>> {
-        if let (Some(runtime), Some(table_scan)) = (&self.runtime, &self.table_scan) {
-            let timeout = Duration::from_secs(timeout_secs);
-            
-            // Check if we have subscription state
-            if let (Some(bucket), Some(offset)) = (self.subscribed_bucket, self.subscribed_offset) {
-                let scan_records = runtime.block_on(async {
-                    // Create a new scanner for this poll operation
-                    let log_scanner = table_scan.create_log_scanner();
-                    
-                    // Use the stored subscription state
-                    log_scanner.subscribe(bucket, offset).await;
-                    
-                    // Poll for records
-                    log_scanner.poll(timeout).await
-                }).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    format!("Failed to poll records: {}", e)
-                ))?;
-                
-                println!("Polled {} records using stored subscription state (bucket: {}, offset: {})", 
-                         scan_records.count(), bucket, offset);
-                
-                // Convert ScanRecords to PyLogRecord
-                let mut py_records = Vec::new();
-                for record in scan_records.into_iter() {
-                    // Convert ScanRecord to PyLogRecord with real data
-                    let py_record = PyLogRecord::new_from_scan_record(&record, &self.schema_info);
-                    py_records.push(py_record);
+    // 这里返回的内部每个元素是一个 Arrow RecordBatch
+    fn poll(&self, timeout_secs: u64) -> PyResult<Vec<PyObject>> {
+        let timeout = Duration::from_secs(timeout_secs);
+        let records = get_runtime().block_on(async {
+            self.inner.poll(timeout).await
+        }).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            format!("Failed to poll log records: {}", e)
+        ))?;
+        
+        let mut py_batches = Vec::new();
+        
+        for record in records {
+            let columnar_row = record.row();
+            // 问题：现在貌似每个 ColumnarRow 就只有一行
+            let record_batch = columnar_row.get_record_batch();
+            let row_id = columnar_row.row_id();
+
+            // 这里有个问题：ColumnarRow 实际上是一个 row
+            // 但是 recordBatch 是 arrow 格式的几条记录
+            // ColumnarRow 是根据 row_id 获取的
+            // 所以就重复了。
+
+            Python::with_gil(|py| {
+                match record_batch.to_pyarrow(py) {
+                    Ok(py_batch) => {
+                        if row_id == 0 {
+                            // workaround for duplicate RecordBatch
+                            py_batches.push(py_batch);
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        format!("Failed to convert RecordBatch to PyArrow: {}", e)
+                    ))
                 }
-                
-                Ok(py_records)
-            } else {
-                // No subscription state, return empty
-                println!("No subscription state available. Please call subscribe() first.");
-                Ok(vec![])
-            }
-        } else {
-            // 占位符实现
-            println!("Polling for {} seconds from {}", timeout_secs, self.table_path.database());
-            Ok(vec![
-                PyLogRecord::new(1, "test_data".to_string()),
-                PyLogRecord::new(2, "test_data2".to_string()),
-            ])
+            })?;
         }
+        
+        Ok(py_batches)
     }
     
     fn seek(&mut self, bucket: i32, offset: i64) -> PyResult<()> {
-        if let (Some(_runtime), Some(_table_scan)) = (&self.runtime, &self.table_scan) {
-            // Update subscription state for seeking
-            self.subscribed_bucket = Some(bucket);
-            self.subscribed_offset = Some(offset);
-            
-            println!("Seeked to bucket {} offset {} for {}", bucket, offset, self.table_path.database());
-        } else {
-            // 占位符实现
-            println!("Seeking to bucket {} offset {} for {}", bucket, offset, self.table_path.database());
-        }
+        // TODO
         Ok(())
     }
     
     fn close(&mut self) -> PyResult<()> {
-        if let (Some(_runtime), Some(_table_scan)) = (&self.runtime, &self.table_scan) {
-            // Clear subscription state
-            self.subscribed_bucket = None;
-            self.subscribed_offset = None;
-            
-            println!("Closed log scanner for {}", self.table_path.database());
-        } else {
-            // 占位符实现
-            println!("Closing log scanner for {}", self.table_path.database());
-        }
+        // TODO
         Ok(())
-    }
-    
-    fn create_log_scanner(&self) -> PyLogScannerInstance {
-        PyLogScannerInstance::new(self)
-    }
-    
-    fn get_schema_info(&self) -> Vec<(String, String)> {
-        self.schema_info.clone()
-    }
-    
-    fn set_schema_info(&mut self, schema_info: Vec<(String, String)>) {
-        self.schema_info = schema_info;
     }
 }
 
-impl PyLogScanner {
-    pub fn new_with_real_scan(table_scan: TableScan, runtime: &Runtime) -> Self {
-        // Since we can't clone Runtime, we need to create a new one
-        // This is a limitation of the current design
-        let new_runtime = Runtime::new().unwrap_or_else(|_| panic!("Failed to create runtime"));
-        PyLogScanner {
-            table_path: TablePath::new("real_table".to_string(), "initialized".to_string()),
-            runtime: Some(new_runtime),
-            table_scan: Some(table_scan),
-            schema_info: vec![
-                ("id".to_string(), "bigint".to_string()),
-                ("name".to_string(), "string".to_string()),
-                ("age".to_string(), "int".to_string()),
-            ],
-            subscribed_bucket: None,
-            subscribed_offset: None,
+impl LogScanner {
+    pub fn from_rust_log_scan(log_scanner: RustLogScanner, schema: RustSchema) -> Self {
+        LogScanner {
+            inner: log_scanner,
+            schema: schema,
         }
     }
 }
@@ -1139,36 +1078,29 @@ impl PyLogScanner {
 // Python wrapper for BatchScanner
 #[pyclass]
 pub struct PyBatchScanner {
-    table_path: TablePath,
+    table_path: RustTablePath,
 }
 
 #[pymethods]
 impl PyBatchScanner {
     #[new]
-    fn new(table_path: &PyTablePath) -> Self {
+    fn new(table_path: &TablePath) -> Self {
         PyBatchScanner { table_path: table_path.inner.clone() }
     }
     
     fn scan(&self, limit: Option<u64>) -> PyResult<Vec<PyBatchRecord>> {
-        // 占位符实现
-        let limit = limit.unwrap_or(100);
-        println!("Scanning {} records from {}", limit, self.table_path.database());
-        Ok(vec![
-            PyBatchRecord::new(1, "batch_data1".to_string()),
-            PyBatchRecord::new(2, "batch_data2".to_string()),
-        ])
+        // TODO: Implement scan for batch scanner
+        Ok(vec![])
     }
     
     fn scan_with_filter(&self, filter: HashMap<String, PyObject>, limit: Option<u64>) -> PyResult<Vec<PyBatchRecord>> {
-        // 占位符实现
+        // TODO: Implement scan_with_filter
         let limit = limit.unwrap_or(100);
-        println!("Scanning {} records with filter from {}", limit, self.table_path.database());
         Ok(vec![])
     }
     
     fn close(&self) -> PyResult<()> {
-        // 占位符实现
-        println!("Closing batch scanner for {}", self.table_path.database());
+        // TODO: Implement close for batch scanner
         Ok(())
     }
 }
@@ -1247,56 +1179,6 @@ impl PyLogRecord {
     }
 }
 
-impl PyLogRecord {
-    // Create from real ScanRecord
-    pub fn new_from_scan_record(scan_record: &ScanRecord, schema_info: &[(String, String)]) -> Self {
-        let mut column_values = HashMap::new();
-        let row = scan_record.row();
-        
-        for (i, (column_name, data_type)) in schema_info.iter().enumerate() {
-            if i >= row.get_field_count() {
-                break;
-            }
-            
-            let value = if row.is_null_at(i) {
-                "null".to_string()
-            } else {
-                match data_type.as_str() {
-                    "int" => row.get_int(i).to_string(),
-                    "bigint" => row.get_long(i).to_string(),
-                    "float" => row.get_float(i).to_string(),
-                    "double" => row.get_double(i).to_string(),
-                    "boolean" => row.get_boolean(i).to_string(),
-                    "tinyint" => row.get_byte(i).to_string(),
-                    "smallint" => row.get_short(i).to_string(),
-                    "string" => row.get_string(i),
-                    "bytes" => format!("bytes[{}]", row.get_bytes(i).len()),
-                    data_type if data_type.starts_with("char(") => {
-                        // Extract length from char(N)
-                        let length = data_type[5..data_type.len()-1].parse::<usize>().unwrap_or(1);
-                        row.get_char(i, length)
-                    },
-                    data_type if data_type.starts_with("binary(") => {
-                        // Extract length from binary(N)
-                        let length = data_type[7..data_type.len()-1].parse::<usize>().unwrap_or(1);
-                        format!("binary[{}]", row.get_binary(i, length).len())
-                    },
-                    _ => row.get_string(i), // Default to string
-                }
-            };
-            
-            column_values.insert(column_name.clone(), value);
-        }
-        
-        PyLogRecord {
-            offset: scan_record.offset(),
-            timestamp: scan_record.timestamp(),
-            change_type: scan_record.change_type().to_string(),
-            column_values,
-        }
-    }
-}
-
 // Python wrapper for BatchRecord
 #[pyclass]
 pub struct PyBatchRecord {
@@ -1322,7 +1204,7 @@ impl PyBatchRecord {
     }
     
     fn get_value(&self, column: &str) -> PyResult<PyObject> {
-        // 占位符实现
+        // TODO: Implement get_value for batch record
         Python::with_gil(|py| {
             match column {
                 "id" => Ok(self.id.into_py(py)),
@@ -1341,21 +1223,21 @@ impl PyBatchRecord {
 #[pymodule]
 fn fluss_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Core classes
-    m.add_class::<PyConnectionConfig>()?;
-    m.add_class::<PyFlussConnection>()?;
-    m.add_class::<PyFlussAdmin>()?;
-    m.add_class::<PyTablePath>()?;
-    m.add_class::<PySchema>()?;
-    m.add_class::<PyTableDescriptor>()?;
-    m.add_class::<PyTable>()?;
-    m.add_class::<PyTableInfo>()?;
+    m.add_class::<ConnectionConfig>()?;
+    m.add_class::<FlussConnection>()?;
+    m.add_class::<FlussAdmin>()?;
+    m.add_class::<TablePath>()?;
+    m.add_class::<Schema>()?;
+    m.add_class::<Column>()?;
+    m.add_class::<DataType>()?;
+    m.add_class::<TableDescriptor>()?;
+    m.add_class::<Table>()?;
+    m.add_class::<TableInfo>()?;
+    m.add_class::<TableScan>()?;
     
     // Data access classes
-    m.add_class::<PyAppendWriter>()?;
-    m.add_class::<PyWriterInstance>()?;
-    m.add_class::<PyWriteResult>()?;
-    m.add_class::<PyLogScanner>()?;
-    m.add_class::<PyLogScannerInstance>()?;
+    m.add_class::<AppendWriter>()?;
+    m.add_class::<LogScanner>()?;
     m.add_class::<PyBatchScanner>()?;
     m.add_class::<PyLogRecord>()?;
     m.add_class::<PyBatchRecord>()?;
@@ -1367,72 +1249,4 @@ fn fluss_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("MAX_RETRY_COUNT", 3)?;
     
     Ok(())
-}
-
-// Python wrapper for Writer Instance
-#[pyclass]
-pub struct PyWriterInstance {
-    table_path: TablePath,
-}
-
-#[pymethods]
-impl PyWriterInstance {
-    #[new]
-    fn new(append_writer: &PyAppendWriter) -> Self {
-        PyWriterInstance {
-            table_path: append_writer.table_path.clone(),
-        }
-    }
-    
-    fn append(&self, batch_data: Vec<HashMap<String, PyObject>>) -> PyResult<()> {
-        // 占位符实现 - 在真实实现中这里会调用底层的append方法
-        println!("Appending batch of {} records to {}", batch_data.len(), self.table_path.database());
-        Ok(())
-    }
-    
-    fn flush(&self) -> PyResult<()> {
-        println!("Flushing writer for {}", self.table_path.database());
-        Ok(())
-    }
-    
-    fn close(&self) -> PyResult<()> {
-        println!("Closing writer for {}", self.table_path.database());
-        Ok(())
-    }
-}
-
-// Python wrapper for LogScanner Instance
-#[pyclass]
-pub struct PyLogScannerInstance {
-    table_path: TablePath,
-}
-
-#[pymethods]
-impl PyLogScannerInstance {
-    #[new]
-    fn new(log_scanner: &PyLogScanner) -> Self {
-        PyLogScannerInstance {
-            table_path: log_scanner.table_path.clone(),
-        }
-    }
-    
-    fn subscribe(&self, bucket: i32, offset: i64) -> PyResult<()> {
-        // 占位符实现 - 在真实实现中这里会调用底层的subscribe方法
-        println!("Subscribing to bucket {} at offset {} for {}", bucket, offset, self.table_path.database());
-        Ok(())
-    }
-    
-    fn poll(&self, timeout_secs: u64) -> PyResult<Vec<PyLogRecord>> {
-        // 占位符实现 - 在真实实现中这里会调用底层的poll方法
-        println!("Polling for {} seconds from {}", timeout_secs, self.table_path.database());
-        Ok(vec![
-            PyLogRecord::new(1, "test_record_1".to_string()),
-            PyLogRecord::new(2, "test_record_2".to_string()),
-        ])
-    }
-    
-    fn seek(&self, bucket: i32, offset: i64) -> PyResult<()> {
-        println!("Seeking to bucket {} offset {} for {}", bucket, offset, self.table_path.database());
-        Ok(())
-    }
 }
