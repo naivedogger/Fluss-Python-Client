@@ -1,7 +1,7 @@
 import fluss_python as fluss
 import pyarrow as pa
 
-# 尽可能还是和 java client 保持一致
+# TODO: Keep consistent with the Java client
 config = fluss.ConnectionConfig("127.0.0.1:9123", 30)
 conn = fluss.FlussConnection(config)
 
@@ -11,7 +11,7 @@ schema.add_column("name", fluss.DataType.string())
 schema.add_column("score", fluss.DataType.float())
 print(schema)
 
-# 也可以这么创建
+# Can also be created this way
 schema_1 = fluss.Schema([
     ("id", fluss.DataType.int()),
     ("name", fluss.DataType.string()),
@@ -19,21 +19,17 @@ schema_1 = fluss.Schema([
 ])
 print(schema_1)
 
-# 创建 TableDescriptor，需要传入 schema，默认只有 1 个 bucket
+# Create TableDescriptor, schema must be provided
 table_descriptor = fluss.TableDescriptor(schema)
 print(table_descriptor)
 
-
 admin = conn.get_admin()
-table_path = fluss.TablePath("fluss", "test_table_11")
+table_path = fluss.TablePath("fluss", "test_table_12")
 admin.create_table(table_path, table_descriptor, True)
-
 
 table = conn.get_table(table_path)
 
-# 需要支持 LogRecord 的写入吗？
-
-# 先创建一个新的 PyArrow RecordBatch
+# First create a new PyArrow RecordBatch
 pa_schema = pa.schema([
     ("id", pa.int32()),
     ("name", pa.string()),
@@ -46,9 +42,9 @@ batch = pa.RecordBatch.from_arrays([
 ], schema=pa_schema)
 
 writer = table.new_append()
-# 直接使用 PyArrow RecordBatch 写入数据
+# Directly write data using PyArrow RecordBatch
 writer.append_batch(batch)
-# 再写入一批 dict。这里需要确保写入的数据和定义的 schema 匹配
+# Append another batch of dictionaries.
 writer.append_batch([
     {"id": 4, "name": "David", "score": 78.9},
     {"id": 5, "name": "Eve", "score": 88.3}
@@ -56,31 +52,30 @@ writer.append_batch([
 
 scanner = table.new_scan()
 log_scanner = scanner.create_log_scanner()
-# snapshot：还没支持
 
-# 订阅所有数据
+# Subscribe from the beginning
 bucket = 0
 offset = 0
 log_scanner.subscribe(bucket, offset)
-# 读取数据 形成 pyarrow record batch
-record_batches = log_scanner.poll(10)  # 添加 timeout 参数
-print(f"读取到 {len(record_batches)} 个批次")
+# Read data and form PyArrow RecordBatches
+record_batches = log_scanner.poll(10)  # Add timeout parameter
+print(f"Read {len(record_batches)} batches")
 i = 0
 for batch in record_batches:
     print(f"Batch {i}: {batch.num_rows} rows, {batch.num_columns} columns")
     i += 1
-    # 转换为 pandas 查看数据
+    # Convert to pandas to view data
     print(batch.to_pandas())
 
-    # 现在 batch 就是一个 PyArrow RecordBatch
-    # 所以应该可以很方便地支持各种其他转换了
-    # 例如转换为 Polars DataFrame
+    # Now batch is a PyArrow RecordBatch
+    # So various other conversions should be easily supported
+    # For example, convert to Polars DataFrame
     import polars as pl
     polars_df = pl.from_arrow(batch)
     print(f"Polars DataFrame: {polars_df.shape}")
     print(polars_df)
 
-    import pandas as pd
+    import pandas
     pandas_df = batch.to_pandas()
     print(f"Pandas DataFrame: {pandas_df.shape}")
     print(pandas_df)
@@ -91,5 +86,3 @@ for batch in record_batches:
     duck_result = duck_conn.execute('SELECT * FROM duck_table').fetchdf()
     print(f"DuckDB DataFrame: {duck_result.shape}")
     print(duck_result)
-
-# 现在不支持删除表 =.= 

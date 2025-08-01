@@ -1027,14 +1027,8 @@ impl LogScanner {
         
         for record in records {
             let columnar_row = record.row();
-            // 问题：现在貌似每个 ColumnarRow 就只有一行
             let record_batch = columnar_row.get_record_batch();
             let row_id = columnar_row.row_id();
-
-            // 这里有个问题：ColumnarRow 实际上是一个 row
-            // 但是 recordBatch 是 arrow 格式的几条记录
-            // ColumnarRow 是根据 row_id 获取的
-            // 所以就重复了。
 
             Python::with_gil(|py| {
                 match record_batch.to_pyarrow(py) {
